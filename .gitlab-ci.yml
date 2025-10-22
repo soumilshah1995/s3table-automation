@@ -1,0 +1,156 @@
+stages:
+  - delete-tables
+  - create-tables
+
+variables:
+  AWS_DEFAULT_REGION: "us-east-1"
+  TABLE_DEFINITIONS_DIR: "table-definitions"
+
+# ============================================================
+# DELETE TABLES STAGE
+# ============================================================
+delete-s3-tables:
+  stage: delete-tables
+  image:
+    name: amazon/aws-cli:latest
+    entrypoint: [""]
+  variables:
+    AWS_ACCESS_KEY_ID: "$AWS_ACCESS_KEY_ID"
+    AWS_SECRET_ACCESS_KEY: "$AWS_SECRET_ACCESS_KEY"
+    AWS_DEFAULT_REGION: "us-east-1"
+  before_script:
+    - echo "Installing dependencies..."
+    - yum install -y git python3-pip
+    - pip3 install pyyaml boto3
+    - export AWS_DEFAULT_REGION="us-east-1"
+    - export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}"
+    - export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}"
+    - |
+      if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+        echo "ERROR: AWS credentials are not set!"
+        exit 1
+      fi
+      echo "AWS credentials configured successfully"
+  script:
+    - |
+      echo "========================================="
+      echo "🗑️  S3 Tables Deletion Stage"
+      echo "========================================="
+
+      # Check for first commit
+      if [ "$CI_COMMIT_BEFORE_SHA" == "0000000000000000000000000000000000000000" ] || [ -z "$CI_COMMIT_BEFORE_SHA" ]; then
+        echo "First commit - no deletions to process"
+        exit 0
+      fi
+
+      # Detect deleted YAML files
+      DELETED_FILES=$(git diff --name-only --diff-filter=D HEAD^ HEAD -- ${TABLE_DEFINITIONS_DIR}/*.yaml ${TABLE_DEFINITIONS_DIR}/*.yml 2>/dev/null || echo "")
+      if [ -z "$DELETED_FILES" ]; then
+        DELETED_FILES=$(git diff-tree --no-commit-id --name-only --diff-filter=D -r $CI_COMMIT_SHA -- ${TABLE_DEFINITIONS_DIR}/*.yaml ${TABLE_DEFINITIONS_DIR}/*.yml 2>/dev/null || echo "")
+      fi
+
+      if [ -z "$DELETED_FILES" ]; then
+        echo "No table definition files deleted."
+        exit 0
+      fi
+
+      echo "Deleted table definition files:"
+      echo "$DELETED_FILES"
+      echo ""
+
+      # Run delete_table.py for each deleted YAML file
+      for yaml_file in $DELETED_FILES; do
+        echo "-----------------------------------------"
+        echo "Processing deleted YAML: $yaml_file"
+        echo "-----------------------------------------"
+
+        FILE_CONTENT=$(git show $CI_COMMIT_BEFORE_SHA:$yaml_file 2>/dev/null)
+        if [ -z "$FILE_CONTENT" ]; then
+          echo "Could not retrieve $yaml_file content from previous commit."
+          continue
+        fi
+
+        echo "$FILE_CONTENT" | python3 scripts/delete_table.py
+      done
+
+      echo "========================================="
+      echo "✅ Deletion process completed!"
+      echo "========================================="
+  only:
+    changes:
+      - table-definitions/*.yaml
+      - table-definitions/*.yml
+      - scripts/*.py
+  allow_failure: true
+
+# ============================================================
+# CREATE / UPDATE TABLES STAGE
+# ============================================================
+create-s3-tables:
+  stage: create-tables
+  image:
+    name: amazon/aws-cli:latest
+    entrypoint: [""]
+  variables:
+    AWS_ACCESS_KEY_ID: "$AWS_ACCESS_KEY_ID"
+    AWS_SECRET_ACCESS_KEY: "$AWS_SECRET_ACCESS_KEY"
+    AWS_DEFAULT_REGION: "us-east-1"
+  before_script:
+    - echo "Installing dependencies..."
+    - yum install -y jq git python3-pip
+    - pip3 install pyyaml
+    - export AWS_DEFAULT_REGION="us-east-1"
+    - export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID}"
+    - export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY}"
+    - |
+      if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then
+        echo "ERROR: AWS credentials are not set!"
+        exit 1
+      fi
+      echo "AWS credentials configured successfully"
+  script:
+    - |
+      echo "========================================="
+      echo "🚀 S3 Tables Creation / Update Stage"
+      echo "========================================="
+
+      # Get new or modified YAMLs
+      if [ -z "$CI_COMMIT_BEFORE_SHA" ] || [ "$CI_COMMIT_BEFORE_SHA" == "0000000000000000000000000000000000000000" ]; then
+        echo "First commit detected - processing all tables"
+        CHANGED_FILES=$(find ${TABLE_DEFINITIONS_DIR} -name "*.yaml" -o -name "*.yml" 2>/dev/null)
+      else
+        CHANGED_FILES=$(git diff --name-only --diff-filter=AM $CI_COMMIT_BEFORE_SHA $CI_COMMIT_SHA -- ${TABLE_DEFINITIONS_DIR}/*.yaml ${TABLE_DEFINITIONS_DIR}/*.yml 2>/dev/null)
+      fi
+
+      if [ -z "$CHANGED_FILES" ]; then
+        echo "No new or modified table definition files."
+        exit 0
+      fi
+
+      for yaml_file in $CHANGED_FILES; do
+        if [ -f "$yaml_file" ]; then
+          echo "-----------------------------------------"
+          echo "Processing table definition: $yaml_file"
+          echo "-----------------------------------------"
+
+          python3 scripts/yaml_to_json.py "$yaml_file" /tmp/table_definition.json
+
+          echo "Creating S3 table from: $yaml_file"
+          aws s3tables create-table --cli-input-json file:///tmp/table_definition.json
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to create table from $yaml_file"
+            exit 1
+          else
+            echo "✅ Successfully created table from $yaml_file"
+          fi
+        fi
+      done
+
+      echo "========================================="
+      echo "✅ All tables processed successfully!"
+      echo "========================================="
+  only:
+    changes:
+      - table-definitions/*.yaml
+      - table-definitions/*.yml
+      - scripts/*.py
