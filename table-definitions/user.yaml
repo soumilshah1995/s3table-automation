@@ -1,0 +1,17 @@
+tableBucketARN: "arn:aws:s3tables:us-east-1:12345:bucket/soumilshah-dev"
+namespace: "testdb"
+name: "users"
+format: "ICEBERG"
+metadata:
+  iceberg:
+    schema:
+      fields:
+        - name: "id"
+          type: "int"
+          required: true
+        - name: "name"
+          type: "string"
+        - name: "value"
+          type: "int"
+        - name: "col1"
+          type: "string"
